@@ -1,8 +1,8 @@
-const { Schema, MapSchema } = require("@colyseus/schema");
-const { Player } = require("./Player");
+import { schema, t } from "@colyseus/schema";
+import { Player } from "./Player.js";
 
-class GameState extends Schema {
-  @MapSchema({ type: Player }) players = new Map();
-}
+const GameState = schema({
+  players: t.map(Player),
+}, "GameState");
 
-module.exports = { GameState };
+export { GameState };

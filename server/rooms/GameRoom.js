@@ -1,72 +1,103 @@
-const { Room,} = require("colyseus");
-const { GameState } = require("../schema/GameState");
-const { Player } = require("../schema/Player");
+import { Room } from "@colyseus/core";
+import { GameState } from "../schema/GameState.js";
+import { Player } from "../schema/Player.js";
 
 const WORLD_SIZE = 20;
 const PLAYER_SPEED = 0.2;
-const GRAVITY = -0.01;
-const JUMP_FORCE = 0.2;
+const GRAVITY = -0.025;
+const JUMP_FORCE = 0.25;
+const INPUT_KEYS = ["forward", "backward", "left", "right", "jump"];
 
 class GameRoom extends Room {
-  onCreate() {
-    this.setState(new GameState());
+  state = new GameState();
+  playerInputs = new Map();
+  jumpVelocities = new Map();
+  npcTargets = {};
 
-    // Server tick for physics and NPCs
-    this.setSimulationInterval((serverTime) => this.update(serverTime), 50);
-    
-    // Spawn some NPCs
+  messages = {
+    move: (client, input) => {
+      if (!input || typeof input !== "object" ||
+          !INPUT_KEYS.every((key) => typeof input[key] === "boolean")) {
+        console.warn(`Invalid movement input from ${client.sessionId}`);
+        return;
+      }
+      const previous = this.playerInputs.get(client.sessionId);
+      if (!previous) return;
+      this.playerInputs.set(client.sessionId, {
+        ...input,
+        jumpQueued: previous.jumpQueued || (input.jump && !previous.jump),
+      });
+    },
+  };
+
+  onCreate() {
+    this.setTimestep(() => this.update(), 50);
+
     for (let i = 0; i < 3; i++) {
       this.spawnNPC(i);
     }
-
-    this.onMessage("move", (client, input) => {
-      this.move(client.sessionId, input);
-    });
   }
 
-  onJoin(client, options) {
-    console.log(`Client joined: ${client.sessionId}`);
-    
+  onJoin(client) {
     const player = new Player();
     player.id = client.sessionId;
-    player.x = Math.random() * 10 - 5;
-    player.z = Math.random() * 10 - 5;
-    player.y = 1;
-    
+    this.placePlayer(player);
     this.state.players.set(client.sessionId, player);
+    this.playerInputs.set(client.sessionId, {
+      forward: false, backward: false, left: false, right: false, jump: false, jumpQueued: false,
+    });
+    console.log(`Client joined: ${client.sessionId}`);
   }
 
-
-
-  onLeave(client, consented) {
+  onLeave(client) {
     this.state.players.delete(client.sessionId);
+    this.playerInputs.delete(client.sessionId);
+    this.jumpVelocities.delete(client.sessionId);
   }
 
   spawnNPC(id) {
     const npc = new Player();
     npc.id = `npc_${id}`;
     npc.isNPC = true;
-    npc.x = Math.random() * WORLD_SIZE - WORLD_SIZE/2;
-    npc.z = Math.random() * WORLD_SIZE - WORLD_SIZE/2;
-    npc.y = 1;
-    
+    this.placePlayer(npc);
+
     const npcId = npc.id;
     this.state.players.set(npcId, npc);
-    
-    // Store NPC target for simple movement
-    if (!this.npcTargets) this.npcTargets = {};
-    this.npcTargets[npcId] = { 
+
+    this.npcTargets[npcId] = {
       x: Math.random() * WORLD_SIZE - WORLD_SIZE/2, 
       z: Math.random() * WORLD_SIZE - WORLD_SIZE/2,
       timer: Math.random() * 100
     };
   }
 
-  // Movement input from client
-  move(sessionId, input) {
-    const player = this.state.players.get(sessionId);
-    if (!player || player.isNPC) return;
+  placePlayer(player) {
+    const limit = WORLD_SIZE / 2 - player.radius;
+    for (let i = 0; i < 100; i++) {
+      const x = Math.random() * limit * 2 - limit;
+      const z = Math.random() * limit * 2 - limit;
+      if (!this.checkCollision(player, x, z)) {
+        player.x = x;
+        player.y = player.radius;
+        player.z = z;
+        return;
+      }
+    }
 
+    for (let x = -limit; x <= limit; x += player.radius) {
+      for (let z = -limit; z <= limit; z += player.radius) {
+        if (!this.checkCollision(player, x, z)) {
+          player.x = x;
+          player.y = player.radius;
+          player.z = z;
+          return;
+        }
+      }
+    }
+    throw new Error("No free space to spawn an avatar");
+  }
+
+  move(player, input) {
     let dx = 0;
     let dz = 0;
 
@@ -75,41 +106,39 @@ class GameRoom extends Room {
     if (input.left) dx -= PLAYER_SPEED;
     if (input.right) dx += PLAYER_SPEED;
 
-    if (input.jump && player.y <= 1.01) {
-       player.y += JUMP_FORCE;
+    if (dx && dz) {
+      dx /= Math.SQRT2;
+      dz /= Math.SQRT2;
     }
 
     this.applyMovement(player, dx, dz);
+
+    let velocity = this.jumpVelocities.get(player.id) || 0;
+    if (input.jumpQueued && player.y <= player.radius) {
+      velocity = JUMP_FORCE;
+    }
+    input.jumpQueued = false;
+    if (player.y > player.radius || velocity > 0) {
+      player.y = Math.max(player.radius, player.y + velocity);
+      velocity += GRAVITY;
+      if (player.y === player.radius) velocity = 0;
+    }
+    this.jumpVelocities.set(player.id, velocity);
   }
 
   applyMovement(player, dx, dz) {
-    const nextX = player.x + dx;
-    const nextZ = player.z + dz;
+    const limit = WORLD_SIZE / 2 - player.radius;
+    const nextX = Math.max(-limit, Math.min(limit, player.x + dx));
+    const nextZ = Math.max(-limit, Math.min(limit, player.z + dz));
 
-    if (this.checkCollision(player, nextX, player.y, nextZ)) {
-      // Simple collision response: stop
-    } else {
-      player.x = nextX;
-      player.z = nextZ;
-    }
-
-    // Gravity
-    if (player.y > 1) {
-      player.y += GRAVITY;
-    } else {
-      player.y = 1;
-    }
-
-    // Boundary check
-    player.x = Math.max(-WORLD_SIZE/2, Math.min(WORLD_SIZE/2, player.x));
-    player.z = Math.max(-WORLD_SIZE/2, Math.min(WORLD_SIZE/2, player.z));
+    if (!this.checkCollision(player, nextX, player.z)) player.x = nextX;
+    if (!this.checkCollision(player, player.x, nextZ)) player.z = nextZ;
   }
 
-  checkCollision(player, nx, ny, nz) {
-    for (let [id, other] of this.state.players) {
+  checkCollision(player, nx, nz) {
+    for (const [id, other] of this.state.players) {
       if (id === player.id) continue;
-      
-      // Simplified distance check for spheres
+
       const distSq = Math.pow(nx - other.x, 2) + Math.pow(nz - other.z, 2);
       const minDist = player.radius + other.radius;
       if (distSq < minDist * minDist) return true;
@@ -117,10 +146,13 @@ class GameRoom extends Room {
     return false;
   }
 
-  update(serverTime) {
-    // Update NPCs
-    for (let [id, player] of this.state.players) {
-      if (!player.isNPC) continue;
+  update() {
+    for (const [id, player] of this.state.players) {
+      if (!player.isNPC) {
+        const input = this.playerInputs.get(id);
+        if (input) this.move(player, input);
+        continue;
+      }
 
       const target = this.npcTargets[id];
       if (!target) continue;
@@ -145,4 +177,4 @@ class GameRoom extends Room {
   }
 }
 
-module.exports = { GameRoom };
+export { GameRoom };

@@ -1,19 +1,29 @@
-const Colyseus = require("colyseus");
-const express = require("express");
-const http = require("http");
-const { GameRoom } = require("./rooms/GameRoom");
+import { pathToFileURL } from "node:url";
+import { defineServer, defineRoom } from "@colyseus/core";
+import { GameRoom } from "./rooms/GameRoom.js";
 
-const app = express();
-const server = http.createServer(app);
-const gameServer = new Colyseus.Server();
+function createGameServer(options = {}) {
+  return defineServer({
+    ...options,
+    rooms: {
+      game: defineRoom(GameRoom),
+    },
+    express: (app) => {
+      app.get("/", (req, res) => {
+        res.send("Colyseus Server is running!");
+      });
+    },
+  });
+}
 
-gameServer.define("game", GameRoom);
-gameServer.listen(server);
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const gameServer = createGameServer();
+  gameServer.listen(2567).then(() => {
+    console.log("Listening on http://localhost:2567");
+  }).catch((error) => {
+    console.error("Failed to start Colyseus server:", error);
+    process.exitCode = 1;
+  });
+}
 
-app.get("/", (req, res) => {
-  res.send("Colyseus Server is running!");
-});
-
-server.listen(2567, () => {
-  console.log("Listening on http://localhost:2567");
-});
+export { createGameServer };
